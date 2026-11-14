@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from app.auth import PermissionDenied
 from app.config import settings
 from app.routers import ROUTERS
 from app.store import store
@@ -21,6 +23,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(PermissionDenied)
+def permission_denied_handler(request: Request, exc: PermissionDenied) -> JSONResponse:
+    """权限与归属校验失败统一返回 403，body 保持 ok/message 口径。"""
+    return JSONResponse(status_code=403, content={"ok": False, "message": exc.message})
+
 
 for module in ROUTERS:
     app.include_router(module.router)

@@ -4,50 +4,49 @@ import { request } from '@/api/client'
 
 const ENDPOINT = '/api/exporttask'
 const columns = [
-  "任务编号",
-  "数据源标识",
-  "目标系统",
-  "传输协议",
-  "压缩格式",
-  "分片大小MB",
-  "加密开关",
-  "校验方式"
+  '任务编号',
+  '数据源标识',
+  '数据源快照编号',
+  '接入版本',
+  '冻结目标端点',
+  '目标系统',
+  '投递状态',
+  '未发送分片序号',
 ]
-const actions = [
-  "提交任务审批",
-  "启动分发",
-  "取消分发"
-]
-const statuses = [
-  "草稿",
-  "任务审批中",
-  "执行中",
-  "已完成",
-  "已取消"
-]
-const stats = [
-  {
-    "label": "分发任务总数",
-    "value": 0
-  },
-  {
-    "label": "执行中任务",
-    "value": 0
-  },
-  {
-    "label": "已完成任务",
-    "value": 0
-  }
-]
+const actions = ['提交任务审批', '启动分发', '恢复分发', '完成分发', '取消分发']
+const statuses = ['草稿', '任务审批中', '执行中', '待恢复', '已完成', '已取消']
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, string | number | null | number[]>
+type Manifest = {
+  任务编号: string
+  分发任务状态: string
+  投递状态: string
+  数据源快照编号: string
+  连接器编号: string
+  接入版本: string
+  压缩前数据源标识: string
+  未发送分片序号: number[]
+  暂停原因: string
+  snapshot: Row | null
+  version: Row | null
+  checks: Record<string, boolean | string | number[]>
+}
+
+function renderCell(value: Row[string] | undefined) {
+  if (Array.isArray(value)) {
+    return value.length ? value.join('、') : '—'
+  }
+  return value === null || value === undefined || value === '' ? '—' : String(value)
+}
 
 export default function ExporttaskView() {
   const [rows, setRows] = useState<Row[]>([])
   const [total, setTotal] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
+  const [notice, setNotice] = useState('')
   const [filters, setFilters] = useState<Record<string, string>>({})
-  const filterFields = useMemo(() => columns.slice(0, 3), [])
+  const [manifest, setManifest] = useState<Manifest | null>(null)
+  const filterFields = useMemo(() => columns.slice(0, 2), [])
 
   const reload = useCallback(async () => {
     setErrorMessage('')
@@ -69,17 +68,37 @@ export default function ExporttaskView() {
     void reload()
   }, [reload])
 
+  async function openManifest(row: Row) {
+    setNotice('')
+    setErrorMessage('')
+    try {
+      const response = await request(`${ENDPOINT}/${row.id}/manifest`)
+      if (!response.ok) {
+        throw new Error('投递清单读取失败')
+      }
+      setManifest(await response.json())
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : '投递清单读取失败')
+    }
+  }
+
   async function runAction(action: string, row: Row) {
     setErrorMessage('')
+    setNotice('')
     try {
       const response = await request(`${ENDPOINT}/${row.id}/actions`, {
         method: 'POST',
         body: JSON.stringify({ action }),
       })
-      if (!response.ok) {
-        throw new Error('数据分发动作未生效，请稍后重试')
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok || payload.ok === false) {
+        throw new Error(payload.message || payload.detail || '数据分发动作未生效')
       }
+      setNotice(payload.message ?? '')
       await reload()
+      if (manifest && manifest.任务编号 === row['任务编号']) {
+        await openManifest(row)
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : '数据分发操作失败')
     }
@@ -90,7 +109,9 @@ export default function ExporttaskView() {
       <header className="page-head">
         <div>
           <h2>数据分发管理</h2>
-          <p className="page-desc">管理采集结果的分发投递任务，支持多地推送、压缩加密和完整性校验。</p>
+          <p className="page-desc">
+            提交任务时冻结数据源快照，投递清单固定引用当时的连接器端点、协议、编码与接入版本。
+          </p>
         </div>
         <div className="page-actions">
           <button className="btn primary" type="button" onClick={() => setErrorMessage('分发任务登记入口尚未接入审批流')}>
@@ -103,7 +124,11 @@ export default function ExporttaskView() {
       </header>
 
       <div className="stat-row">
-        {stats.map((item) => (
+        {[
+          { label: '分发任务总数', value: total },
+          { label: '执行中任务', value: rows.filter((row) => row['投递状态'] === '执行中').length },
+          { label: '待恢复任务', value: rows.filter((row) => row['投递状态'] === '待恢复').length },
+        ].map((item) => (
           <article key={item.label} className="stat-card">
             <span className="stat-label">{item.label}</span>
             <strong className="stat-value">{item.value}</strong>
@@ -122,6 +147,16 @@ export default function ExporttaskView() {
             />
           </label>
         ))}
+        <label className="filter-item">
+          <span>投递状态</span>
+          <select
+            value={filters.status ?? ''}
+            onChange={(event) => setFilters((prev) => ({ ...prev, status: event.target.value }))}
+          >
+            <option value="">全部</option>
+            {statuses.map((status) => <option key={status} value={status}>{status}</option>)}
+          </select>
+        </label>
         <button className="btn" type="submit">查询</button>
         <button className="btn ghost" type="button" onClick={() => setFilters({})}>重置条件</button>
       </form>
@@ -136,8 +171,9 @@ export default function ExporttaskView() {
         <tbody>
           {rows.map((row) => (
             <tr key={String(row.id)}>
-              {columns.map((column) => <td key={column}>{row[column] ?? '—'}</td>)}
+              {columns.map((column) => <td key={column}>{renderCell(row[column])}</td>)}
               <td className="row-actions">
+                <button className="link" type="button" onClick={() => void openManifest(row)}>投递清单</button>
                 {actions.map((action) => (
                   <button key={action} className="link" type="button" onClick={() => void runAction(action, row)}>
                     {action}
@@ -154,9 +190,46 @@ export default function ExporttaskView() {
         </tbody>
       </table>
 
+      {manifest && (
+        <section className="detail-panel">
+          <header className="detail-head">
+            <h3>投递清单 · {manifest.任务编号}</h3>
+            <button className="btn ghost" type="button" onClick={() => setManifest(null)}>关闭</button>
+          </header>
+          <dl className="detail-grid">
+            <div><dt>分发任务状态</dt><dd>{manifest.分发任务状态}</dd></div>
+            <div><dt>数据源快照</dt><dd>{manifest.数据源快照编号 || '—'}</dd></div>
+            <div><dt>连接器 / 接入版本</dt><dd>{manifest.连接器编号 || '—'} / {manifest.接入版本 || '—'}</dd></div>
+            <div><dt>压缩前数据源标识</dt><dd>{manifest.压缩前数据源标识 || '—'}</dd></div>
+            <div><dt>冻结目标端点</dt><dd>{renderCell(manifest.snapshot?.['目标端点'])}</dd></div>
+            <div><dt>冻结协议 / 编码</dt><dd>{renderCell(manifest.snapshot?.['协议类型'])} / {renderCell(manifest.snapshot?.['数据编码'])}</dd></div>
+            <div><dt>未发送分片序号</dt><dd>{renderCell(manifest.未发送分片序号)}</dd></div>
+            <div><dt>暂停原因</dt><dd>{manifest.暂停原因 || '—'}</dd></div>
+          </dl>
+          <p className={String(manifest.checks['结论']).startsWith('一致') ? 'ok-text' : 'error-text'}>
+            {String(manifest.checks['结论'])}
+          </p>
+          <table className="data-table">
+            <thead>
+              <tr><th>校验项</th><th>结果</th></tr>
+            </thead>
+            <tbody>
+              {Object.entries(manifest.checks)
+                .filter(([, value]) => typeof value === 'boolean')
+                .map(([key, value]) => (
+                  <tr key={key}><td>{key}</td><td>{value ? '通过' : '不通过'}</td></tr>
+                ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
       <footer className="page-foot">
         <span>共 {total} 条数据分发记录</span>
-        {errorMessage && <span className="error-text">{errorMessage}</span>}
+        <span>
+          {notice && <span className="ok-text">{notice}　</span>}
+          {errorMessage && <span className="error-text">{errorMessage}</span>}
+        </span>
       </footer>
     </section>
   )

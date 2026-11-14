@@ -653,3 +653,121 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '变更详情': '操作审计样例3',
   '操作结果': '操作审计样例3'}]
 }
+
+
+def _seed_connector_versions() -> None:
+    """为示例连接器补齐数据源标识、所属单位与接入版本。
+
+    CONN-0003 是分发任务 EXPO-0003 冻结快照的来源；CONN-0002 额外保留一个
+    待确认改版，用来演示“改版只能生成新待确认版本”。
+    """
+    version_rows: list[dict[str, Any]] = []
+    version_fields = ["协议类型", "目标端点", "数据编码", "认证参数", "重连次数", "心跳间隔", "超时阈值"]
+    units = {"CONN-0001": "数据一科", "CONN-0002": "数据二科", "CONN-0003": "数据一科"}
+    for index, connector in enumerate(SEED_ROWS["connector"], start=1):
+        code = str(connector["连接器编号"])
+        connector["数据源标识"] = f"DS-{code}"
+        connector["所属单位"] = units.get(code, "数据一科")
+        connector["接入版本"] = "v1"
+        connector["版本状态"] = "已确认"
+        version_rows.append({
+            "id": index,
+            "status": "已确认",
+            "pending": False,
+            "abnormal": False,
+            "连接器编号": code,
+            "接入版本": "v1",
+            "版本序号": 1,
+            "占用任务号": ["EXPO-0003"] if code == "CONN-0003" else [],
+            "所属单位": connector["所属单位"],
+            "创建时间": "2026-09-01 09:00",
+            "确认时间": "2026-09-01 09:30",
+            **{field: connector[field] for field in version_fields},
+        })
+
+    # CONN-0002 的待确认改版：只追加新版本，旧版本仍是已确认版本。
+    connector2 = next(row for row in SEED_ROWS["connector"] if row["连接器编号"] == "CONN-0002")
+    version_rows.append({
+        "id": len(version_rows) + 1,
+        "status": "待确认",
+        "pending": True,
+        "abnormal": False,
+        "连接器编号": "CONN-0002",
+        "接入版本": "v2",
+        "版本序号": 2,
+        "占用任务号": [],
+        "所属单位": connector2["所属单位"],
+        "创建时间": "2026-09-02 10:00",
+        "确认时间": "",
+        "协议类型": connector2["协议类型"],
+        "目标端点": "https://staging.example.local/api/v2/ingest",
+        "数据编码": "UTF-8",
+        "认证参数": connector2["认证参数"],
+        "重连次数": connector2["重连次数"],
+        "心跳间隔": connector2["心跳间隔"],
+        "超时阈值": connector2["超时阈值"],
+    })
+    SEED_ROWS["connector_version"] = version_rows
+
+
+def _seed_data_source_snapshots() -> None:
+    """给示例分发任务补投递清单：EXPO-0003 冻结 CONN-0003 的 v1 版本。"""
+    connector3 = next(row for row in SEED_ROWS["connector"] if row["连接器编号"] == "CONN-0003")
+    tasks = SEED_ROWS["exporttask"]
+    for index, task in enumerate(tasks):
+        code = str(task["任务编号"])
+        task["所属单位"] = "数据一科"
+        task["分片总数"] = 8
+        task["已发送分片"] = 3 if code == "EXPO-0003" else 0
+        task["未发送分片序号"] = list(range(4, 9)) if code == "EXPO-0003" else list(range(1, 9))
+        task["暂停原因"] = ""
+        task["快照状态"] = "未冻结"
+        task["数据源快照编号"] = ""
+        task["接入版本"] = ""
+        task["压缩前数据源标识"] = ""
+        task["冻结目标端点"] = ""
+        task["冻结协议类型"] = ""
+        task["冻结数据编码"] = ""
+        task["连接器编号"] = ""
+        if code not in {"EXPO-0002", "EXPO-0003"}:
+            continue
+        task["数据源标识"] = connector3["数据源标识"]
+        task["连接器编号"] = "CONN-0003"
+        task["接入版本"] = "v1"
+        task["压缩前数据源标识"] = connector3["数据源标识"]
+        task["冻结目标端点"] = connector3["目标端点"]
+        task["冻结协议类型"] = connector3["协议类型"]
+        task["冻结数据编码"] = connector3["数据编码"]
+        task["快照状态"] = "已冻结"
+        task["数据源快照编号"] = f"DSNAP-{code}-01"
+        task["冻结时间"] = "2026-09-03 09:15"
+
+    snapshots = [
+        {
+            "id": index + 1,
+            "status": "已冻结",
+            "pending": False,
+            "abnormal": False,
+            "快照编号": f"DSNAP-{task['任务编号']}-01",
+            "任务编号": task["任务编号"],
+            "连接器编号": "CONN-0003",
+            "接入版本": "v1",
+            "版本状态": "已确认",
+            "压缩前数据源标识": connector3["数据源标识"],
+            "协议类型": connector3["协议类型"],
+            "目标端点": connector3["目标端点"],
+            "数据编码": connector3["数据编码"],
+            "认证参数": connector3["认证参数"],
+            "所属单位": "数据一科",
+            "冻结时间": "2026-09-03 09:15",
+            "释放时间": "",
+            "释放原因": "",
+            "占用状态": "占用中",
+        }
+        for index, task in enumerate([row for row in tasks if row["任务编号"] in {"EXPO-0002", "EXPO-0003"}])
+    ]
+    SEED_ROWS["data_source_snapshot"] = snapshots
+
+
+_seed_connector_versions()
+_seed_data_source_snapshots()

@@ -1,10 +1,11 @@
-"""连接器管理接口：维护数据连接器，覆盖发起连通测试、标记就绪、标记离线等动作。"""
+"""连接器管理接口：维护数据连接器，覆盖连通测试、就绪/离线、接入版本改版与确认。"""
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.auth import Actor, current_actor, require_writer
 from app.schemas import ActionResult, EntryPayload, PageResult
 from app.services.connector import ConnectorService
 
@@ -22,8 +23,9 @@ def list_entries(
     status: str | None = Query(default=None, description="草稿、连通测试中、已就绪、已离线"),
     page: int = 1,
     size: int = 20,
+    actor: Actor = Depends(current_actor),
 ) -> PageResult[dict]:
-    """按连接器编号与状态过滤连接器管理列表；没有数据时返回空页，不报错。"""
+    """按连接器编号与状态过滤连接器管理列表；只读账号也可以查看。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
@@ -31,35 +33,51 @@ def list_entries(
 
 
 @router.get("/{entry_id}", response_model=dict)
-def get_entry(entry_id: int) -> dict:
-    """读取单条数据连接器明细；不存在时给出可读的错误说明。"""
+def get_entry(entry_id: int, actor: Actor = Depends(current_actor)) -> dict:
+    """读取单条数据连接器明细，附带接入版本列表。"""
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"数据连接器 {entry_id} 不存在或已归档")
-    return entry
+    detail = dict(entry)
+    detail["接入版本列表"] = service.list_versions(str(entry.get("连接器编号") or ""))
+    return detail
 
 
 @router.post("", response_model=ActionResult)
-def create_entry(payload: EntryPayload) -> ActionResult:
+def create_entry(payload: EntryPayload, actor: Actor = Depends(require_writer)) -> ActionResult:
     """登记一条数据连接器，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload.values)
+    entry, missing, note = service.create_entry(payload.values, actor=actor)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="数据连接器已登记", entry=entry)
+    if entry is None:
+        return ActionResult(ok=False, message=note or "数据连接器登记失败")
+    return ActionResult(ok=True, message=note or "数据连接器已登记", entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
-def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条数据连接器执行发起连通测试、标记就绪、标记离线；不允许的动作会被拦下并说明原因。"""
+def run_action(
+    entry_id: int, payload: EntryPayload, actor: Actor = Depends(require_writer)
+) -> ActionResult:
+    """执行连通测试、改版、确认版本等动作；越权和不支持的动作会被拦下并说明原因。"""
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    entry, message = service.run_action(entry_id, action, payload.values, actor=actor)
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
 
 
+@router.get("/{entry_id}/versions", response_model=PageResult[dict])
+def list_versions(entry_id: int, actor: Actor = Depends(current_actor)) -> PageResult[dict]:
+    """列出连接器的全部接入版本，包含已废弃版本，便于追溯。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"数据连接器 {entry_id} 不存在或已归档")
+    versions = service.list_versions(str(entry.get("连接器编号") or ""))
+    return PageResult(items=versions, total=len(versions), page=1, size=len(versions) or 1)
+
+
 @router.get("/export")
-def export_entries() -> dict[str, Any]:
+def export_entries(actor: Actor = Depends(current_actor)) -> dict[str, Any]:
     """导出连接器管理清单：返回当前过滤条件下的全量数据。"""
     items, total = service.list_entries(page=1, size=10000)
     return {"module": "connector", "total": total, "items": items}
